@@ -1,0 +1,26 @@
+app/
+__pycache__/
+.pytest_cache/
+logs/
+*.pyc
+*.tmp
+
+# Local legacy script contains personal credentials.
+/net.py
+/.idea/
+/.agents/
+/.codex/
+/scripts/
+.env
+.env.*
+*.bak
+*.pending
+settings.json
+settings.json.*
+status.json
+*.log
+*.log.*
+*.pfx
+*.p12
+*.pem
+*.key
