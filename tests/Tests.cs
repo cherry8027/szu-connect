@@ -21,7 +21,9 @@ namespace SzuConnect
         private sealed class Network : HttpMessageHandler
         {
             internal bool Internet, Online, Reject, BadChallenge, Redirect;
-            internal int Logins;
+            internal bool PortalUnavailable, LoginDoesNotAuthenticate;
+            internal string StatusError;
+            internal int Logins, StatusRequests;
             internal Dictionary<string, string> LastLogin;
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
             {
@@ -35,7 +37,12 @@ namespace SzuConnect
                     else if (!Internet) { status = HttpStatusCode.ServiceUnavailable; }
                     else body = path.EndsWith(".txt") ? "Microsoft Connect Test" : "User-agent: *";
                 }
-                else if (path == "/cgi-bin/rad_user_info") body = Wrap(new { error = Online ? "ok" : "not_online_error" });
+                else if (path == "/cgi-bin/rad_user_info")
+                {
+                    StatusRequests++;
+                    if (PortalUnavailable) status = HttpStatusCode.ServiceUnavailable;
+                    body = Wrap(new { error = StatusError ?? (Online ? "ok" : "not_online_error") });
+                }
                 else if (path == "/srun_portal_pc") body = "var CONFIG = {acid: \"12\"};";
                 else if (path == "/cgi-bin/get_challenge") body = Wrap(new {
                     error = "ok", challenge = BadChallenge ? "" : "0123456789abcdef0123456789abcdef", client_ip = "10.1.2.3"
@@ -47,7 +54,7 @@ namespace SzuConnect
                     LastLogin = new Dictionary<string, string>();
                     foreach (string key in query.AllKeys) LastLogin[key] = query[key];
                     if (Reject) body = Wrap(new { error = "login_error", error_msg = "password_error" });
-                    else { Online = true; Internet = true; body = Wrap(new { error = "ok" }); }
+                    else { Online = !LoginDoesNotAuthenticate; Internet = true; body = Wrap(new { error = "ok" }); }
                 }
                 else throw new Exception("Unexpected HTTP request: " + path);
                 return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) });
@@ -72,11 +79,42 @@ namespace SzuConnect
             catch (FormatException) { invalid = true; }
             Expect(invalid, "Truncated JSONP rejected");
 
-            var online = new Network { Internet = true };
+            var online = new Network { Internet = true, Online = true };
             using (var portal = new Portal(online))
             {
                 var result = await portal.CheckAsync("u", "p", CancellationToken.None);
                 Expect(result.Online && online.Logins == 0, "Healthy network never authenticates");
+            }
+            var masked = new Network { Internet = true };
+            using (var portal = new Portal(masked))
+            {
+                var result = await portal.CheckAsync("u", "p", CancellationToken.None);
+                Expect(result.Online && masked.Logins == 1, "Working external/VPN connection must not mask expired campus authentication");
+                Expect(masked.StatusRequests == 2, "Campus authentication is checked before and after login");
+            }
+            var unavailable = new Network { Internet = true, PortalUnavailable = true };
+            using (var portal = new Portal(unavailable))
+            {
+                bool failed = false;
+                try { await portal.CheckAsync("u", "p", CancellationToken.None); }
+                catch (HttpRequestException error)
+                {
+                    failed = true;
+                    Expect((string)error.Data["Endpoint"] == "/cgi-bin/rad_user_info", "Failure identifies safe endpoint without credentials");
+                }
+                Expect(failed && unavailable.Logins == 0, "Unreachable portal is not reported healthy or blindly authenticated");
+            }
+            var busy = new Network { StatusError = "busy_error" };
+            using (var portal = new Portal(busy))
+            {
+                var result = await portal.CheckAsync("u", "p", CancellationToken.None);
+                Expect(!result.Online && busy.Logins == 0, "Unknown portal state must not trigger authentication");
+            }
+            var unconfirmed = new Network { LoginDoesNotAuthenticate = true };
+            using (var portal = new Portal(unconfirmed))
+            {
+                var result = await portal.CheckAsync("u", "p", CancellationToken.None);
+                Expect(!result.Online && unconfirmed.Logins == 1, "Login requires confirmed campus session, not only reachable Internet");
             }
             var authenticated = new Network { Online = true };
             using (var portal = new Portal(authenticated))
@@ -147,6 +185,29 @@ namespace SzuConnect
                 Expect(Directory.GetFiles(Settings.DataDirectory, Path.GetFileName(savePath) + ".*.tmp").Length == 0, "Failed save cleans temporary files");
             }
             finally { File.Delete(savePath); File.Delete(savePath + ".tmp"); }
+            string logPath = Path.Combine(Settings.DataDirectory, "log-test-" + Guid.NewGuid().ToString("N") + ".log");
+            try
+            {
+                using (var writer = new FileStream(logPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    byte[] text = System.Text.Encoding.UTF8.GetBytes("校园网认证状态：在线\r\n网络正常\r\n");
+                    writer.Write(text, 0, text.Length);
+                    writer.Flush();
+                    Expect(LogForm.ReadLog(logPath).Contains("校园网认证状态：在线"), "Log viewer reads UTF-8 while the log is open for writing");
+                    writer.Write(text, 0, text.Length);
+                    writer.Flush();
+                    Expect(LogForm.ReadLog(logPath).Length > System.Text.Encoding.UTF8.GetString(text).Length, "Log refresh reads appended content");
+                }
+                string rotated = logPath + ".1";
+                File.Move(logPath, rotated);
+                try
+                {
+                    File.WriteAllText(logPath, "轮转后的新日志", System.Text.Encoding.UTF8);
+                    Expect(LogForm.ReadLog(logPath) == "轮转后的新日志", "Log viewer reads the current file after rotation");
+                }
+                finally { File.Delete(rotated); }
+            }
+            finally { File.Delete(logPath); }
         }
 
         public static int Main(string[] args)

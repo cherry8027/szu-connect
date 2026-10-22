@@ -10,8 +10,19 @@ if (-not (Test-Path -LiteralPath $SettingsPath)) {
 $OriginalHash = (Get-FileHash -LiteralPath $SettingsPath).Hash
 $Background = $null
 try {
-    $Background = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
-    Start-Sleep -Seconds 1
+    $Background = Start-Process -FilePath $Executable -ArgumentList '--settings' -PassThru -WindowStyle Hidden
+    $CheckedWhileEditing = $false
+    $StatusPath = Join-Path $env:LOCALAPPDATA 'SzuConnect\status.json'
+    for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
+        if ($Background.HasExited) { throw 'Background process exited while opening settings.' }
+        try {
+            $Status = Get-Content -LiteralPath $StatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $CheckedWhileEditing = $Status.pid -eq $Background.Id -and $null -ne $Status.nextCheck
+        } catch { }
+        if ($CheckedWhileEditing) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $CheckedWhileEditing) { throw 'Monitoring did not run while the settings window remained open.' }
     $Check = Start-Process -FilePath $Executable -ArgumentList '--check' -PassThru -Wait -WindowStyle Hidden
     if ($Check.ExitCode -ne 3) { throw 'A second check did not detect the running instance.' }
     $Import = Start-Process -FilePath $Executable -ArgumentList '--import-credentials' -PassThru -Wait -WindowStyle Hidden
@@ -28,7 +39,7 @@ try {
     if ($Background.HasExited) { throw 'Restart was discarded.' }
     $Check = Start-Process -FilePath $Executable -ArgumentList '--check' -PassThru -Wait -WindowStyle Hidden
     if ($Check.ExitCode -ne 3) { throw 'Restarted process does not hold the single-instance lock.' }
-    Write-Host 'PASS: single instance, import protection, graceful stop, immediate restart'
+    Write-Host 'PASS: monitoring while editing settings, single instance, import protection, graceful stop, immediate restart'
 } finally {
     Start-Process -FilePath $Executable -ArgumentList '--stop' -Wait -WindowStyle Hidden
     if ($Background) {

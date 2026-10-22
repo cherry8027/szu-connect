@@ -25,6 +25,7 @@ namespace SzuConnect
     {
         internal const string Host = "https://net.szu.edu.cn";
         private readonly HttpClient client;
+        internal Action<string> Report = delegate { };
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
         public Portal() : this(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false }) { }
@@ -58,10 +59,21 @@ namespace SzuConnect
 
         private async Task<string> GetAsync(string url, CancellationToken token)
         {
-            using (var response = await client.GetAsync(url, token))
+            int statusCode = 0;
+            try
             {
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync();
+                using (var response = await client.GetAsync(url, token))
+                {
+                    statusCode = (int)response.StatusCode;
+                    response.EnsureSuccessStatusCode();
+                    return await response.Content.ReadAsStringAsync();
+                }
+            }
+            catch (Exception error)
+            {
+                error.Data["Endpoint"] = new Uri(url).AbsolutePath;
+                if (statusCode != 0) error.Data["HttpStatus"] = statusCode;
+                throw;
             }
         }
 
@@ -97,10 +109,17 @@ namespace SzuConnect
 
         internal async Task<CheckResult> CheckAsync(string username, string password, CancellationToken token)
         {
-            if (await InternetAsync(token)) return new CheckResult(true, "网络正常");
             var status = await StatusAsync(token);
-            if (Field(status, "error") == "ok")
-                return new CheckResult(false, "认证在线，外网暂不可用");
+            string statusError = Field(status, "error");
+            if (statusError == "ok")
+            {
+                Report("校园网认证状态：在线");
+                bool connected = await InternetAsync(token);
+                return new CheckResult(connected, connected ? "网络正常" : "认证在线，外网暂不可用");
+            }
+            if (statusError != "not_online_error" && statusError != "ip_not_online_error" && statusError != "not_online")
+                return new CheckResult(false, "无法确认校园网认证状态");
+            Report("校园网认证状态：未登录");
             if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(password))
                 return new CheckResult(false, "请设置校园网账号和密码", true);
 
@@ -117,6 +136,7 @@ namespace SzuConnect
             if (Field(challenge, "error") != "ok" || string.IsNullOrEmpty(key) || !IPAddress.TryParse(ip, out parsedIp))
                 return new CheckResult(false, "认证服务器未返回有效挑战值或客户端地址");
 
+            Report("校园网未登录，开始自动认证");
             var result = await ApiAsync("/cgi-bin/srun_portal", LoginParameters(username, password, key, ip, acid), token);
             string error = Field(result, "error");
             bool accepted = error == "ok" || Field(result, "res") == "ok" ||
@@ -132,7 +152,7 @@ namespace SzuConnect
             await Task.Delay(2000, token);
             bool authenticated = Field(await StatusAsync(token), "error") == "ok";
             bool internet = await InternetAsync(token);
-            return new CheckResult(internet, internet ? "已恢复联网" :
+            return new CheckResult(authenticated && internet, authenticated && internet ? "已恢复联网" :
                 authenticated ? "认证成功，外网暂不可用" : "服务器已接受请求，尚未确认联网");
         }
 

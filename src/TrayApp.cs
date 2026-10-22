@@ -1,7 +1,5 @@
 using System;
-using System.Diagnostics;
 using System.Drawing;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -17,8 +15,10 @@ namespace SzuConnect
         private readonly CancellationTokenSource shutdown = new CancellationTokenSource();
         private readonly EventWaitHandle stopSignal = new EventWaitHandle(false, EventResetMode.AutoReset, Program.StopName);
         private readonly EventWaitHandle settingsSignal = new EventWaitHandle(false, EventResetMode.AutoReset, Program.SettingsName);
+        private readonly EventWaitHandle logSignal = new EventWaitHandle(false, EventResetMode.AutoReset, Program.LogName);
         private readonly RegisteredWaitHandle stopWait;
         private readonly RegisteredWaitHandle settingsWait;
+        private readonly RegisteredWaitHandle logWait;
         private readonly Portal portal = new Portal();
         private readonly ToolStripMenuItem statusItem = new ToolStripMenuItem("正在启动") { Enabled = false };
         private readonly ToolStripMenuItem nextItem = new ToolStripMenuItem("") { Enabled = false };
@@ -29,12 +29,14 @@ namespace SzuConnect
         private string lastMessage = "";
         private Task runningCheck = Task.FromResult(0);
         private SettingsForm settingsDialog;
+        private LogForm logDialog;
 
-        internal TrayApp(bool showSettings)
+        internal TrayApp(bool showSettings, bool showLogs)
         {
             var unused = dispatcher.Handle;
             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             settings = Settings.Load();
+            portal.Report = Settings.Log;
             var menu = new ContextMenuStrip();
             menu.Items.Add(statusItem);
             menu.Items.Add(nextItem);
@@ -62,10 +64,19 @@ namespace SzuConnect
                 try { dispatcher.BeginInvoke(new Action(OpenSettings)); }
                 catch (InvalidOperationException) { }
             }, null, Timeout.Infinite, false);
+            logWait = ThreadPool.RegisterWaitForSingleObject(logSignal, delegate {
+                try { dispatcher.BeginInvoke(new Action(OpenLog)); }
+                catch (InvalidOperationException) { }
+            }, null, Timeout.Infinite, false);
             Settings.Log("后台程序启动");
-            if (showSettings || string.IsNullOrEmpty(settings.Username) || string.IsNullOrEmpty(settings.ProtectedPassword))
+            if (string.IsNullOrEmpty(settings.Username) || string.IsNullOrEmpty(settings.ProtectedPassword))
                 dispatcher.BeginInvoke(new Action(OpenSettings));
-            else QueueCheck();
+            else
+            {
+                QueueCheck();
+                if (showSettings) dispatcher.BeginInvoke(new Action(OpenSettings));
+            }
+            if (showLogs) dispatcher.BeginInvoke(new Action(OpenLog));
         }
 
         private void QueueCheck()
@@ -93,13 +104,15 @@ namespace SzuConnect
             }
             catch (Exception error)
             {
-                Settings.Log("检测异常: " + error.GetType().Name);
+                Settings.Log("检测异常: " + error.GetType().Name + "; 接口=" + (error.Data["Endpoint"] ?? "未知") +
+                    "; HTTP=" + (error.Data["HttpStatus"] ?? "无响应"));
                 result = new CheckResult(false, "暂时无法连接认证服务器");
             }
             busy = false;
             if (closing || paused) return;
             failures = result.Online ? 0 : failures + 1;
             int delay = Portal.DelaySeconds(failures, settings.IntervalSeconds, result.CredentialError);
+            Settings.Log("检测完成: " + result.Message + "; 下次检测=" + delay + "秒");
             ShowStatus(result.Message, result.Online, DateTime.Now.AddSeconds(delay));
             timer.Interval = delay * 1000;
             timer.Start();
@@ -121,7 +134,6 @@ namespace SzuConnect
         {
             if (closing) return;
             if (settingsDialog != null) { settingsDialog.Activate(); return; }
-            timer.Stop();
             using (var dialog = new SettingsForm(settings))
             {
                 settingsDialog = dialog;
@@ -138,9 +150,12 @@ namespace SzuConnect
 
         private void OpenLog()
         {
-            Directory.CreateDirectory(Settings.DataDirectory);
-            if (!File.Exists(Settings.LogPath)) Settings.Log("日志已创建");
-            Process.Start("notepad.exe", "\"" + Settings.LogPath + "\"");
+            if (closing) return;
+            if (logDialog == null || logDialog.IsDisposed) logDialog = new LogForm();
+            logDialog.Show();
+            if (logDialog.WindowState == FormWindowState.Minimized) logDialog.WindowState = FormWindowState.Normal;
+            logDialog.Reload();
+            logDialog.Activate();
         }
 
         private async void BeginExit()
@@ -148,6 +163,7 @@ namespace SzuConnect
             if (closing) return;
             closing = true;
             if (settingsDialog != null) settingsDialog.Close();
+            if (logDialog != null && !logDialog.IsDisposed) logDialog.Close();
             timer.Stop();
             shutdown.Cancel();
             tray.Visible = false;
@@ -156,8 +172,10 @@ namespace SzuConnect
             Settings.Log("后台程序退出");
             stopWait.Unregister(null);
             settingsWait.Unregister(null);
+            logWait.Unregister(null);
             stopSignal.Dispose();
             settingsSignal.Dispose();
+            logSignal.Dispose();
             timer.Dispose();
             portal.Dispose();
             tray.Dispose();

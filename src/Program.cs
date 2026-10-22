@@ -12,6 +12,7 @@ namespace SzuConnect
         internal static string InstanceName { get { return @"Local\SzuConnect-" + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value; } }
         internal static string StopName { get { return InstanceName + "-Stop"; } }
         internal static string SettingsName { get { return InstanceName + "-Settings"; } }
+        internal static string LogName { get { return InstanceName + "-Logs"; } }
         [STAThread]
         private static int Main(string[] args)
         {
@@ -66,7 +67,8 @@ namespace SzuConnect
                     if (!owns)
                     {
                         if (args.Length > 0 && args[0] == "--check") return 3;
-                        try { using (var signal = EventWaitHandle.OpenExisting(SettingsName)) signal.Set(); }
+                        string eventName = args.Length > 0 && args[0] == "--logs" ? LogName : SettingsName;
+                        try { using (var signal = EventWaitHandle.OpenExisting(eventName)) signal.Set(); }
                         catch (WaitHandleCannotBeOpenedException) { }
                         return 0;
                     }
@@ -77,6 +79,7 @@ namespace SzuConnect
                             var settings = Settings.Load();
                             using (var portal = new Portal())
                             {
+                                portal.Report = Settings.Log;
                                 var result = portal.CheckAsync(settings.Username, settings.Password(), CancellationToken.None).GetAwaiter().GetResult();
                                 Settings.WriteStatus(result.Message, result.Online, null);
                                 return result.Online ? 0 : 2;
@@ -84,7 +87,7 @@ namespace SzuConnect
                         }
                         Application.EnableVisualStyles();
                         Application.SetCompatibleTextRenderingDefault(false);
-                        Application.Run(new TrayApp(args.Length > 0 && args[0] == "--settings"));
+                        Application.Run(new TrayApp(args.Length > 0 && args[0] == "--settings", args.Length > 0 && args[0] == "--logs"));
                     }
                     finally { mutex.ReleaseMutex(); }
                 }
